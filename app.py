@@ -87,6 +87,21 @@ def upload_to_google_drive(file_path, file_name):
     # Return the shareable link
     return file.get('webContentLink')
 
+def get_audio_duration(audio_path):
+    result = subprocess.run(
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        return None
+    duration_str = result.stdout.decode().strip()
+    try:
+        return float(duration_str)
+    except ValueError:
+        return None
+
 @app.route('/create_video', methods=['POST'])
 def create_video():
     data = request.json
@@ -114,25 +129,39 @@ def create_video():
     if not download_file(audio_url, audio_path):
         return jsonify({'error': 'Failed to download audio.'}), 400
 
+    # Get audio duration
+    duration = get_audio_duration(audio_path)
+    if duration is None:
+        return jsonify({'error': 'Failed to get audio duration.'}), 500
+
     # FFmpeg command to create video
     ffmpeg_command = [
-      './ffmpeg/ffmpeg', '-y',
-      '-loop', '1',
-      '-i', image_path,
-      '-i', audio_path,
-      '-c:v', 'mpeg4',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-pix_fmt', 'yuv420p',
-      '-shortest',
-      output_path
-  ]
+        './ffmpeg/ffmpeg', '-y',
+        '-loop', '1',
+        '-i', image_path,
+        '-i', audio_path,
+        '-t', str(duration),
+        '-c:v', 'libx264',
+        '-tune', 'stillimage',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        output_path
+    ]
 
     # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # Decode FFmpeg outputs
+    ffmpeg_stdout = result.stdout.decode()
+    ffmpeg_stderr = result.stderr.decode()
+
+    # Log FFmpeg outputs
+    print(f"FFmpeg stdout: {ffmpeg_stdout}")
+    print(f"FFmpeg stderr: {ffmpeg_stderr}")
+
     if result.returncode != 0:
-        error_msg = result.stderr.decode()
-        return jsonify({'error': 'FFmpeg failed.', 'details': error_msg}), 500
+        return jsonify({'error': 'FFmpeg failed.', 'details': ffmpeg_stderr}), 500
 
     # Upload the video to Google Drive
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
