@@ -116,17 +116,17 @@ def create_video():
 
     # FFmpeg command to create video
     ffmpeg_command = [
-    './ffmpeg/ffmpeg', '-y',
-    '-loop', '1',
-    '-i', image_path,   # Input image
-    '-i', audio_path,   # Input audio
-    '-c:v', 'libx264',  # Video codec
-    '-c:a', 'aac',      # Audio codec
-    '-b:a', '192k',     # Audio bitrate
-    '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
-    '-shortest',        # Stop encoding when the shortest input ends (audio)
-    output_path
-]
+        './ffmpeg/ffmpeg', '-loop', '1',
+        '-i', image_path,
+        '-i', audio_path,
+        '-c:v', 'libx264',
+        '-tune', 'stillimage',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-shortest',
+        output_path
+    ]
 
     # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
