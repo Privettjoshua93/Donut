@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import subprocess
 import os
 import requests
+import threading
 from werkzeug.utils import secure_filename
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -14,10 +15,11 @@ app = Flask(__name__)
 # Get Google Drive Folder ID and Credentials from Environment Variables
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Add WEBHOOK_URL to your environment variables
 
 # Ensure credentials are available
-if not GOOGLE_CREDENTIALS_JSON or not GOOGLE_DRIVE_FOLDER_ID:
-    raise Exception("Google Drive credentials or folder ID not set in environment variables.")
+if not GOOGLE_CREDENTIALS_JSON or not GOOGLE_DRIVE_FOLDER_ID or not WEBHOOK_URL:
+    raise Exception("Missing environment variables.")
 
 # Load credentials
 credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -87,31 +89,7 @@ def upload_to_google_drive(file_path, file_name):
     # Return the shareable link
     return file.get('webContentLink')
 
-def get_audio_duration(audio_path):
-    result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
-         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    if result.returncode != 0:
-        return None
-    duration_str = result.stdout.decode().strip()
-    try:
-        return float(duration_str)
-    except ValueError:
-        return None
-
-@app.route('/create_video', methods=['POST'])
-def create_video():
-    data = request.json
-
-    image_url = data.get('image_url')
-    audio_url = data.get('audio_url')
-
-    if not image_url or not audio_url:
-        return jsonify({'error': 'image_url and audio_url are required.'}), 400
-
+def process_video(image_url, audio_url):
     # Create secure filenames
     image_filename = secure_filename(image_url.split('/')[-1]) + '.jpg'
     audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
@@ -121,57 +99,79 @@ def create_video():
     audio_path = os.path.join(TEMP_DIR, audio_filename)
     output_path = os.path.join(TEMP_DIR, output_filename)
 
-    # Download image
-    if not download_file(image_url, image_path):
-        return jsonify({'error': 'Failed to download image.'}), 400
+    try:
+        # Download image
+        if not download_file(image_url, image_path):
+            raise Exception('Failed to download image.')
 
-    # Download audio
-    if not download_file(audio_url, audio_path):
-        return jsonify({'error': 'Failed to download audio.'}), 400
+        # Download audio
+        if not download_file(audio_url, audio_path):
+            raise Exception('Failed to download audio.')
 
-    # Get audio duration
-    duration = get_audio_duration(audio_path)
-    if duration is None:
-        return jsonify({'error': 'Failed to get audio duration.'}), 500
+        # FFmpeg command to create video
+        ffmpeg_command = [
+            './ffmpeg/ffmpeg', '-y',
+            '-loop', '1',
+            '-i', image_path,
+            '-i', audio_path,
+            '-c:v', 'libx264',
+            '-tune', 'stillimage',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-pix_fmt', 'yuv420p',
+            '-shortest',
+            output_path
+        ]
 
-    # FFmpeg command to create video
-    ffmpeg_command = [
-        './ffmpeg/ffmpeg', '-y',
-        '-loop', '1',
-        '-i', image_path,
-        '-i', audio_path,
-        '-t', str(duration),
-        '-c:v', 'libx264',
-        '-tune', 'stillimage',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-pix_fmt', 'yuv420p',
-        output_path
-    ]
+        # Run the FFmpeg command
+        result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # Run the FFmpeg command
-    result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()
+            print(f"FFmpeg failed: {error_msg}")
+            send_callback({'error': 'FFmpeg failed.', 'details': error_msg})
+            return
 
-    # Decode FFmpeg outputs
-    ffmpeg_stdout = result.stdout.decode()
-    ffmpeg_stderr = result.stderr.decode()
+        # Upload the video to Google Drive
+        shareable_link = upload_to_google_drive(output_path, 'output.mp4')
 
-    # Log FFmpeg outputs
-    print(f"FFmpeg stdout: {ffmpeg_stdout}")
-    print(f"FFmpeg stderr: {ffmpeg_stderr}")
+        # Send callback to Make.com
+        send_callback({'video_link': shareable_link})
 
-    if result.returncode != 0:
-        return jsonify({'error': 'FFmpeg failed.', 'details': ffmpeg_stderr}), 500
+    except Exception as e:
+        print(f"Error processing video: {str(e)}")
+        send_callback({'error': str(e)})
+    finally:
+        # Clean up files
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
 
-    # Upload the video to Google Drive
-    shareable_link = upload_to_google_drive(output_path, 'output.mp4')
+def send_callback(data):
+    try:
+        response = requests.post(WEBHOOK_URL, json=data)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send callback: {e}")
 
-    # Clean up files
-    os.remove(image_path)
-    os.remove(audio_path)
-    os.remove(output_path)
+@app.route('/create_video', methods=['POST'])
+def create_video_endpoint():
+    data = request.json
 
-    return jsonify({'video_link': shareable_link}), 200
+    image_url = data.get('image_url')
+    audio_url = data.get('audio_url')
+
+    if not image_url or not audio_url:
+        return jsonify({'error': 'image_url and audio_url are required.'}), 400
+
+    # Start background processing
+    threading.Thread(target=process_video, args=(image_url, audio_url)).start()
+
+    # Respond immediately
+    return jsonify({'status': 'Processing started'}), 202
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
