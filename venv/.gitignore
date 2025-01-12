@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+temp/
+credentials.json
+ffmpeg/
+donut-447406-61c61206db0e.json
