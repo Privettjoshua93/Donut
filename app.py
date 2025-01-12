@@ -88,6 +88,23 @@ def upload_to_google_drive(file_path, file_name):
     return file.get('webContentLink')
 
 @app.route('/create_video', methods=['POST'])
+
+def get_audio_duration(audio_path):
+    result = subprocess.run(
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        return None
+    duration_str = result.stdout.decode().strip()
+    try:
+        duration = float(duration_str)
+        return duration
+    except ValueError:
+        return None
+        
 def create_video():
     data = request.json
 
@@ -113,18 +130,22 @@ def create_video():
     # Download audio
     if not download_file(audio_url, audio_path):
         return jsonify({'error': 'Failed to download audio.'}), 400
+        # Get audio duration
+    duration = get_audio_duration(audio_path)
+    if duration is None:
+        return jsonify({'error': 'Failed to get audio duration.'}), 500
 
     # FFmpeg command to create video
     ffmpeg_command = [
     './ffmpeg/ffmpeg', '-y',
     '-loop', '1',
-    '-i', image_path,   # Input image
-    '-i', audio_path,   # Input audio
-    '-c:v', 'libx264',  # Video codec
-    '-c:a', 'aac',      # Audio codec
-    '-b:a', '192k',     # Audio bitrate
-    '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
-    '-shortest',        # Stop encoding when the shortest input ends (audio)
+    '-i', image_path,
+    '-i', audio_path,
+    '-t', str(duration),
+    '-c:v', 'libx264',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-pix_fmt', 'yuv420p',
     output_path
 ]
 
