@@ -141,12 +141,10 @@ def create_video():
     '-loop', '1',
     '-i', image_path,
     '-i', audio_path,
+    '-t', str(duration),
     '-c:v', 'libx264',
-    '-c:a', 'aac',
-    '-b:a', '192k',
+    '-tune', 'stillimage',
     '-pix_fmt', 'yuv420p',
-    '-shortest',
-    '-r', '25',
     output_path
 ]
 
