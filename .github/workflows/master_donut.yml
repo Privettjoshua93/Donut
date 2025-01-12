@@ -26,7 +26,13 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-      
+      - name: Download FFmpeg
+        run: |
+          mkdir -p ffmpeg
+          cd ffmpeg
+          wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xJf ffmpeg-release-amd64-static.tar.xz --strip-components=1
+          cd ..
       - name: Install dependencies
         run: pip install -r requirements.txt
         
