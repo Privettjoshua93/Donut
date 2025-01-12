@@ -117,18 +117,15 @@ def create_video():
     # FFmpeg command to create video
     ffmpeg_command = [
     './ffmpeg/ffmpeg', '-y',
-    '-i', audio_path,
     '-loop', '1',
     '-i', image_path,
-    '-c:v', 'libx264',
-    '-preset', 'medium',
-    '-tune', 'stillimage',
-    '-crf', '18',
-    '-vf', 'scale=1280:720,setsar=1:1',
+    '-i', audio_path,
+    '-c:v', 'mpeg4',
+    '-q:v', '1',
+    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
     '-c:a', 'aac',
     '-b:a', '192k',
     '-shortest',
-    '-pix_fmt', 'yuv420p',
     output_path
 ]
 
