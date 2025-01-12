@@ -120,10 +120,11 @@ def create_video():
     '-loop', '1',
     '-i', image_path,   # Input image
     '-i', audio_path,   # Input audio
-    '-c:a', 'aac',      # Audio codec
     '-c:v', 'libx264',  # Video codec
-    '-shortest',        # Stop when audio ends
-    '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+    '-c:a', 'aac',      # Audio codec
+    '-b:a', '192k',     # Audio bitrate
+    '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
+    '-shortest',        # Stop encoding when the shortest input ends (audio)
     output_path
 ]
 
