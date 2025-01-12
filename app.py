@@ -87,11 +87,9 @@ def upload_to_google_drive(file_path, file_name):
     # Return the shareable link
     return file.get('webContentLink')
 
-@app.route('/create_video', methods=['POST'])
-
 def get_audio_duration(audio_path):
     result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+        ['ffprobe', '-v', 'error', '-show_entries',
          'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
@@ -104,7 +102,8 @@ def get_audio_duration(audio_path):
         return duration
     except ValueError:
         return None
-        
+
+@app.route('/create_video', methods=['POST'])
 def create_video():
     data = request.json
 
@@ -130,23 +129,26 @@ def create_video():
     # Download audio
     if not download_file(audio_url, audio_path):
         return jsonify({'error': 'Failed to download audio.'}), 400
-        # Get audio duration
+
+    # Get audio duration
     duration = get_audio_duration(audio_path)
     if duration is None:
         return jsonify({'error': 'Failed to get audio duration.'}), 500
 
     # FFmpeg command to create video
     ffmpeg_command = [
-    './ffmpeg/ffmpeg', '-y',
-    '-loop', '1',
-    '-i', image_path,
-    '-i', audio_path,
-    '-t', str(duration),
-    '-c:v', 'libx264',
-    '-tune', 'stillimage',
-    '-pix_fmt', 'yuv420p',
-    output_path
-]
+        'ffmpeg', '-y',
+        '-loop', '1',
+        '-i', image_path,
+        '-i', audio_path,
+        '-c:v', 'libx264',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-shortest',
+        '-t', str(duration),
+        output_path
+    ]
 
     # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -157,9 +159,12 @@ def create_video():
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
 
     # Clean up files
-    os.remove(image_path)
-    os.remove(audio_path)
-    os.remove(output_path)
+    try:
+        os.remove(image_path)
+        os.remove(audio_path)
+        os.remove(output_path)
+    except Exception:
+        pass  # Ignore cleanup errors
 
     return jsonify({'video_link': shareable_link}), 200
 
