@@ -13,6 +13,10 @@ from googleapiclient.http import MediaFileUpload
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
 
+# Ensure credentials are available
+if not GOOGLE_CREDENTIALS_JSON or not GOOGLE_DRIVE_FOLDER_ID:
+    raise Exception("Google Drive credentials or folder ID not set in environment variables.")
+
 # Load credentials
 credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
 credentials = service_account.Credentials.from_service_account_info(
@@ -29,23 +33,30 @@ if not os.path.exists(TEMP_DIR):
 def download_file(url, dest_path):
     session = requests.Session()
     if "drive.google.com" in url:
-        file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
-        if file_id_match:
-            file_id = file_id_match.group(1)
-        else:
-            file_id_match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
-            if file_id_match:
-                file_id = file_id_match.group(1)
-            else:
-                return False
-        download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
+        file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url) or re.search(r'id=([a-zA-Z0-9_-]+)', url)
+        if not file_id_match:
+            return False  # Unable to extract file ID
+        file_id = file_id_match.group(1)
+        download_url = f'https://docs.google.com/uc?export=download&id={file_id}'
         response = session.get(download_url, stream=True)
+        # Handle potential confirmation prompt
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
+        if token:
+            params = {'confirm': token}
+            response = session.get(download_url, params=params, stream=True)
+        else:
+            response = session.get(download_url, stream=True)
     else:
         response = session.get(url, stream=True)
     if response.status_code == 200:
         with open(dest_path, 'wb') as f:
-            for chunk in response.iter_content(1024):
-                f.write(chunk)
+            for chunk in response.iter_content(32768):
+                if chunk:
+                    f.write(chunk)
         return True
     else:
         return False
@@ -73,38 +84,38 @@ def upload_to_google_drive(file_path, file_name):
 
 def get_audio_duration(audio_path):
     result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
-         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+        ['./ffmpeg/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', audio_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
     if result.returncode != 0:
         return None
-    duration_str = result.stdout.decode().strip()
     try:
-        return float(duration_str)
-    except ValueError:
+        data = json.loads(result.stdout.decode())
+        duration = float(data['format']['duration'])
+        return duration
+    except (KeyError, ValueError, json.JSONDecodeError):
         return None
 
 def get_video_duration(video_path):
     result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
-         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
+        ['./ffmpeg/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', video_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
     if result.returncode != 0:
         return None
-    duration_str = result.stdout.decode().strip()
     try:
-        return float(duration_str)
-    except ValueError:
+        data = json.loads(result.stdout.decode())
+        duration = float(data['format']['duration'])
+        return duration
+    except (KeyError, ValueError, json.JSONDecodeError):
         return None
 
 def process_video_audio(video_url, audio_url):
     # Create secure filenames
-    video_filename = secure_filename(video_url.split('/')[-1])
-    audio_filename = secure_filename(audio_url.split('/')[-1])
+    video_filename = secure_filename(video_url.split('/')[-1]) + '.mp4'
+    audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
     video_path = os.path.join(TEMP_DIR, video_filename)
     audio_path = os.path.join(TEMP_DIR, audio_filename)
     output_filename = f"output_{os.getpid()}.mp4"
@@ -127,11 +138,15 @@ def process_video_audio(video_url, audio_url):
     # Calculate loop count
     loop_count = int(audio_duration // video_duration) + 1
 
-    # Create a list file for concatenation
+    # Loop the video
+    looped_videos = []
+    for _ in range(loop_count):
+        looped_videos.append(f"file '{video_path}'\n")
+
+    # Create concat list file
     concat_list_path = os.path.join(TEMP_DIR, f"concat_list_{os.getpid()}.txt")
     with open(concat_list_path, 'w') as f:
-        for _ in range(loop_count):
-            f.write(f"file '{video_path}'\n")
+        f.writelines(looped_videos)
 
     # Concatenate videos
     looped_video_path = os.path.join(TEMP_DIR, f"looped_video_{os.getpid()}.mp4")
@@ -146,6 +161,7 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_concat_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
+        print(f"FFmpeg concat error: {error_msg}")
         return jsonify({'error': 'FFmpeg failed to concatenate video.', 'details': error_msg}), 500
 
     # Trim video to match audio duration
@@ -160,6 +176,7 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_trim_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
+        print(f"FFmpeg trim error: {error_msg}")
         return jsonify({'error': 'FFmpeg failed to trim video.', 'details': error_msg}), 500
 
     # Combine video with new audio, muting original audio
@@ -179,6 +196,7 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
+        print(f"FFmpeg combine error: {error_msg}")
         return jsonify({'error': 'FFmpeg failed to create video.', 'details': error_msg}), 500
 
     # Upload the video to Google Drive
