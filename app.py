@@ -3,11 +3,11 @@ import subprocess
 import os
 import requests
 from werkzeug.utils import secure_filename
+import json
+import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-import json
-import re
 
 app = Flask(__name__)
 
@@ -117,78 +117,20 @@ def create_video():
     if not image_url and not video_url:
         return jsonify({'error': 'Either image_url or video_url is required.'}), 400
 
-    # Create secure filenames
     audio_filename = secure_filename(audio_url.split('/')[-1])
     audio_path = os.path.join(TEMP_DIR, audio_filename)
+
+    if not download_file(audio_url, audio_path):
+        return jsonify({'error': 'Failed to download audio.'}), 400
 
     output_filename = secure_filename(f"output_{os.getpid()}.mp4")
     output_path = os.path.join(TEMP_DIR, output_filename)
 
-    # Download audio
-    if not download_file(audio_url, audio_path):
-        return jsonify({'error': 'Failed to download audio.'}), 400
-
-    if video_url:
-        video_filename = secure_filename(video_url.split('/')[-1])
-        video_path = os.path.join(TEMP_DIR, video_filename)
-        # Download video
-        if not download_file(video_url, video_path):
-            return jsonify({'error': 'Failed to download video.'}), 400
-
-        # Extract existing audio from video
-        existing_audio_path = os.path.join(TEMP_DIR, f"existing_audio_{os.getpid()}.aac")
-        ffmpeg_extract_audio_command = [
-            './ffmpeg/ffmpeg', '-y',
-            '-i', video_path,
-            '-vn',
-            '-acodec', 'aac',
-            existing_audio_path
-        ]
-
-        result = subprocess.run(ffmpeg_extract_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            error_msg = result.stderr.decode()
-            return jsonify({'error': 'FFmpeg failed to extract audio.', 'details': error_msg}), 500
-
-        # Mix existing audio with new audio
-        mixed_audio_path = os.path.join(TEMP_DIR, f"mixed_audio_{os.getpid()}.aac")
-        ffmpeg_mix_audio_command = [
-            './ffmpeg/ffmpeg', '-y',
-            '-i', existing_audio_path,
-            '-i', audio_path,
-            '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest',
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            mixed_audio_path
-        ]
-
-        result = subprocess.run(ffmpeg_mix_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            error_msg = result.stderr.decode()
-            return jsonify({'error': 'FFmpeg failed to mix audio.', 'details': error_msg}), 500
-
-        # Combine video with mixed audio
-        ffmpeg_command = [
-            './ffmpeg/ffmpeg', '-y',
-            '-i', video_path,
-            '-i', mixed_audio_path,
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-movflags', '+faststart',
-            '-map', '0:v:0',
-            '-map', '1:a:0',
-            output_path
-        ]
-
-        result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            error_msg = result.stderr.decode()
-            return jsonify({'error': 'FFmpeg failed to combine video and audio.', 'details': error_msg}), 500
-
-    else:
+    if image_url:
+        # Image processing path
         image_filename = secure_filename(image_url.split('/')[-1])
         image_path = os.path.join(TEMP_DIR, image_filename)
-        # Download image
+
         if not download_file(image_url, image_path):
             return jsonify({'error': 'Failed to download image.'}), 400
 
@@ -197,7 +139,7 @@ def create_video():
         if duration is None:
             return jsonify({'error': 'Failed to get audio duration.'}), 500
 
-        # FFmpeg command to create video
+        # FFmpeg command to create video from image and audio without flashing issue
         ffmpeg_command = [
             './ffmpeg/ffmpeg', '-y',
             '-loop', '1',
@@ -205,18 +147,15 @@ def create_video():
             '-i', audio_path,
             '-c:v', 'libx264',
             '-tune', 'stillimage',
-            '-profile:v', 'high',
-            '-level', '4.2',
-            '-vf', "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2,format=yuv420p",
             '-c:a', 'aac',
             '-b:a', '192k',
-            '-ac', '2',
-            '-ar', '48000',
             '-pix_fmt', 'yuv420p',
+            '-shortest',
             '-movflags', '+faststart',
+            '-vf', 'format=yuv420p',
+            '-preset', 'fast',
             '-r', '30',
             '-t', str(duration),
-            '-shortest',
             output_path
         ]
 
@@ -226,19 +165,120 @@ def create_video():
             error_msg = result.stderr.decode()
             return jsonify({'error': 'FFmpeg failed to create video.', 'details': error_msg}), 500
 
+        # Clean up files
+        os.remove(image_path)
+
+    elif video_url:
+        # Video processing path
+        video_filename = secure_filename(video_url.split('/')[-1])
+        video_path = os.path.join(TEMP_DIR, video_filename)
+
+        if not download_file(video_url, video_path):
+            return jsonify({'error': 'Failed to download video.'}), 400
+
+        # Mute original video audio
+        muted_video_path = os.path.join(TEMP_DIR, f"muted_video_{os.getpid()}.mp4")
+        ffmpeg_mute_command = [
+            './ffmpeg/ffmpeg', '-y',
+            '-i', video_path,
+            '-c:v', 'copy',
+            '-an',
+            muted_video_path
+        ]
+        result = subprocess.run(ffmpeg_mute_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()
+            return jsonify({'error': 'FFmpeg failed to mute video.', 'details': error_msg}), 500
+
+        # Get durations
+        video_duration_result = subprocess.run(
+            ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+             'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', muted_video_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        if video_duration_result.returncode != 0:
+            return jsonify({'error': 'Failed to get video duration.'}), 500
+        video_duration_str = video_duration_result.stdout.decode().strip()
+        try:
+            video_duration = float(video_duration_str)
+        except ValueError:
+            return jsonify({'error': 'Invalid video duration.'}), 500
+
+        audio_duration = get_audio_duration(audio_path)
+        if audio_duration is None:
+            return jsonify({'error': 'Failed to get audio duration.'}), 500
+
+        # Calculate how many times to loop the video
+        loop_count = int(audio_duration // video_duration) + 1
+
+        # Create file with loop count
+        concat_list_path = os.path.join(TEMP_DIR, f"concat_list_{os.getpid()}.txt")
+        with open(concat_list_path, 'w') as f:
+            for i in range(loop_count):
+                f.write(f"file '{muted_video_path}'\n")
+
+        # Concatenate the video multiple times
+        concatenated_video_path = os.path.join(TEMP_DIR, f"concatenated_video_{os.getpid()}.mp4")
+        ffmpeg_concat_command = [
+            './ffmpeg/ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_list_path,
+            '-c', 'copy',
+            concatenated_video_path
+        ]
+        result = subprocess.run(ffmpeg_concat_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()
+            return jsonify({'error': 'FFmpeg failed to concatenate video.', 'details': error_msg}), 500
+
+        # Trim the concatenated video to match the audio duration
+        trimmed_video_path = os.path.join(TEMP_DIR, f"trimmed_video_{os.getpid()}.mp4")
+        ffmpeg_trim_command = [
+            './ffmpeg/ffmpeg', '-y',
+            '-i', concatenated_video_path,
+            '-t', str(audio_duration),
+            '-c', 'copy',
+            trimmed_video_path
+        ]
+        result = subprocess.run(ffmpeg_trim_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()
+            return jsonify({'error': 'FFmpeg failed to trim video.', 'details': error_msg}), 500
+
+        # Combine the trimmed video with the audio
+        ffmpeg_combine_command = [
+            './ffmpeg/ffmpeg', '-y',
+            '-i', trimmed_video_path,
+            '-i', audio_path,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-movflags', '+faststart',
+            output_path
+        ]
+        result = subprocess.run(ffmpeg_combine_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()
+            return jsonify({'error': 'FFmpeg failed to combine video and audio.', 'details': error_msg}), 500
+
+        # Clean up intermediate files
+        os.remove(video_path)
+        os.remove(muted_video_path)
+        os.remove(concat_list_path)
+        os.remove(concatenated_video_path)
+        os.remove(trimmed_video_path)
+
+    else:
+        return jsonify({'error': 'Invalid input. Provide either image_url or video_url.'}), 400
+
     # Upload the video to Google Drive
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
 
-    # Clean up files
+    # Clean up audio and output files
     os.remove(audio_path)
     os.remove(output_path)
-
-    if video_url:
-        os.remove(video_path)
-        os.remove(existing_audio_path)
-        os.remove(mixed_audio_path)
-    else:
-        os.remove(image_path)
 
     return jsonify({'video_link': shareable_link}), 200
 
