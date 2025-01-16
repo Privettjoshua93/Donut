@@ -197,7 +197,7 @@ def create_video():
         if duration is None:
             return jsonify({'error': 'Failed to get audio duration.'}), 500
 
-        # FFmpeg command to create video from image and audio
+        # FFmpeg command to create video
         ffmpeg_command = [
             './ffmpeg/ffmpeg', '-y',
             '-loop', '1',
