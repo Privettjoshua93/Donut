@@ -75,22 +75,6 @@ def upload_to_google_drive(file_path, file_name):
     # Return the shareable link
     return file.get('webContentLink')
 
-def get_audio_duration(audio_path):
-    """Get the duration of the audio file in seconds."""
-    result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
-         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    if result.returncode != 0:
-        return None
-    duration_str = result.stdout.decode().strip()
-    try:
-        return float(duration_str)
-    except ValueError:
-        return None
-
 def get_video_duration(video_path):
     """Get the duration of the video file in seconds."""
     result = subprocess.run(
@@ -107,11 +91,28 @@ def get_video_duration(video_path):
     except ValueError:
         return None
 
-def process_video_audio(video_url, audio_url):
+def get_audio_duration(audio_path):
+    """Get the duration of the audio file in seconds."""
+    result = subprocess.run(
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        return None
+    duration_str = result.stdout.decode().strip()
+    try:
+        return float(duration_str)
+    except ValueError:
+        return None
+
+def create_video_from_video(video_url, audio_url):
     # Create secure filenames
     video_filename = secure_filename(video_url.split('/')[-1]) + '.mp4'
     audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
     output_filename = f"output_{os.getpid()}.mp4"
+
     video_path = os.path.join(TEMP_DIR, video_filename)
     audio_path = os.path.join(TEMP_DIR, audio_filename)
     output_path = os.path.join(TEMP_DIR, output_filename)
@@ -125,40 +126,35 @@ def process_video_audio(video_url, audio_url):
         return jsonify({'error': 'Failed to download audio.'}), 400
 
     # Get durations
-    video_duration = get_video_duration(video_path)
     audio_duration = get_audio_duration(audio_path)
+    if audio_duration is None:
+        return jsonify({'error': 'Failed to get audio duration.'}), 500
 
-    if video_duration is None or audio_duration is None:
-        return jsonify({'error': 'Failed to get durations.'}), 500
-
-    # Determine the number of loops needed
-    loops = int(audio_duration // video_duration) + 1
-
-    # FFmpeg command
+    # FFmpeg command to process video and audio
     ffmpeg_command = [
         './ffmpeg/ffmpeg', '-y',
-        '-stream_loop', str(loops - 1),
+        '-stream_loop', '-1',
         '-i', video_path,
         '-i', audio_path,
-        '-filter_complex',
-        '[0:v]scale=min(1080\\,iw):min(1350\\,ih),pad=1080:1350:(1080-iw)/2:(1350-ih)/2,format=yuv420p[v]',
-        '-map', '[v]',
-        '-map', '1:a',
+        '-map', '0:v:0', '-map', '1:a:0',
         '-c:v', 'libx264',
+        '-vf', "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2",
         '-c:a', 'aac',
         '-b:a', '192k',
         '-ac', '2',
+        '-ar', '48000',
         '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        '-t', str(audio_duration),
         '-shortest',
         output_path
     ]
 
     # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        return jsonify({'error': 'FFmpeg failed.', 'details': error_msg}), 500
+        return jsonify({'error': 'FFmpeg failed to process video and audio.', 'details': error_msg}), 500
 
     # Upload the video to Google Drive
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
@@ -169,6 +165,3 @@ def process_video_audio(video_url, audio_url):
     os.remove(output_path)
 
     return jsonify({'video_link': shareable_link}), 200
-
-def create_video_from_video(video_url, audio_url):
-    return process_video_audio(video_url, audio_url)
