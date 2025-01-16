@@ -9,13 +9,14 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Get Google Drive Folder ID and Credentials from Environment Variables
-GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
+# Ensure a temporary directory exists
+TEMP_DIR = 'temp'
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
 
-# Ensure credentials are available
-if not GOOGLE_CREDENTIALS_JSON or not GOOGLE_DRIVE_FOLDER_ID:
-    raise Exception("Google Drive credentials or folder ID not set in environment variables.")
+# Get Google Drive Folder ID and Credentials from Environment Variables
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
+GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
 # Load credentials
 credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -24,11 +25,6 @@ credentials = service_account.Credentials.from_service_account_info(
     scopes=['https://www.googleapis.com/auth/drive']
 )
 drive_service = build('drive', 'v3', credentials=credentials)
-
-# Ensure a temporary directory exists
-TEMP_DIR = 'temp'
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
 
 def download_file(url, dest_path):
     session = requests.Session()
@@ -45,43 +41,30 @@ def download_file(url, dest_path):
             else:
                 return False  # Unable to extract file ID
 
-        def get_confirm_token(response):
-            for key, value in response.cookies.items():
-                if key.startswith('download_warning'):
-                    return value
-            return None
+        download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
 
-        def save_response_content(response, destination):
-            CHUNK_SIZE = 32768
-            with open(destination, "wb") as f:
-                for chunk in response.iter_content(CHUNK_SIZE):
-                    if chunk:
-                        f.write(chunk)
-
-        base_url = "https://docs.google.com/uc?export=download"
-        response = session.get(base_url, params={'id': file_id}, stream=True)
-        token = get_confirm_token(response)
-
+        response = session.get(download_url, stream=True)
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
         if token:
-            params = {'id': file_id, 'confirm': token}
-            response = session.get(base_url, params=params, stream=True)
-
-        if response.status_code == 200:
-            save_response_content(response, dest_path)
-            return True
+            params = {'confirm': token}
+            response = session.get(download_url, params=params, stream=True)
         else:
-            return False
+            response = session.get(download_url, stream=True)
     else:
         response = session.get(url, stream=True)
 
-        if response.status_code == 200:
-            with open(dest_path, 'wb') as f:
-                for chunk in response.iter_content(1024):
-                    if chunk:
-                        f.write(chunk)
-            return True
-        else:
-            return False
+    if response.status_code == 200:
+        with open(dest_path, 'wb') as f:
+            for chunk in response.iter_content(32768):
+                if chunk:
+                    f.write(chunk)
+        return True
+    else:
+        return False
 
 def upload_to_google_drive(file_path, file_name):
     file_metadata = {
@@ -89,11 +72,15 @@ def upload_to_google_drive(file_path, file_name):
         'parents': [GOOGLE_DRIVE_FOLDER_ID]
     }
     media = MediaFileUpload(file_path, resumable=True)
+
+    # Upload the file
     file = drive_service.files().create(
         body=file_metadata,
         media_body=media,
         fields='id, webContentLink, webViewLink'
     ).execute()
+
+    # Make the file shareable
     permission = {
         'type': 'anyone',
         'role': 'reader',
@@ -102,9 +89,12 @@ def upload_to_google_drive(file_path, file_name):
         fileId=file['id'],
         body=permission,
     ).execute()
+
+    # Return the shareable link
     return file.get('webContentLink')
 
 def get_audio_duration(audio_path):
+    """Get the duration of the audio file in seconds."""
     result = subprocess.run(
         ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
          'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
@@ -120,6 +110,7 @@ def get_audio_duration(audio_path):
         return None
 
 def get_video_duration(video_path):
+    """Get the duration of the video file in seconds."""
     result = subprocess.run(
         ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
          'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
@@ -134,13 +125,14 @@ def get_video_duration(video_path):
     except ValueError:
         return None
 
-def process_video_audio(video_url, audio_url):
+def create_video_from_video(video_url, audio_url):
     # Create secure filenames
-    video_filename = secure_filename(video_url.split('/')[-1] + '.mp4')
-    audio_filename = secure_filename(audio_url.split('/')[-1] + '.mp3')
+    video_filename = secure_filename(video_url.split('/')[-1]) + '.mp4'
+    audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
+    output_filename = f"output_{os.getpid()}.mp4"
+
     video_path = os.path.join(TEMP_DIR, video_filename)
     audio_path = os.path.join(TEMP_DIR, audio_filename)
-    output_filename = f"output_{os.getpid()}.mp4"
     output_path = os.path.join(TEMP_DIR, output_filename)
 
     # Download video
@@ -179,7 +171,6 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_concat_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        print(f"FFmpeg concat error: {error_msg}")
         return jsonify({'error': 'FFmpeg failed to concatenate video.', 'details': error_msg}), 500
 
     # Trim video to match audio duration
@@ -194,7 +185,6 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_trim_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        print(f"FFmpeg trim error: {error_msg}")
         return jsonify({'error': 'FFmpeg failed to trim video.', 'details': error_msg}), 500
 
     # Combine video with new audio, muting original audio
@@ -214,8 +204,7 @@ def process_video_audio(video_url, audio_url):
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        print(f"FFmpeg combine error: {error_msg}")
-        return jsonify({'error': 'FFmpeg failed to create video.', 'details': error_msg}), 500
+        return jsonify({'error': 'FFmpeg failed to combine video and audio.', 'details': error_msg}), 500
 
     # Upload the video to Google Drive
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
@@ -223,9 +212,9 @@ def process_video_audio(video_url, audio_url):
     # Clean up files
     os.remove(video_path)
     os.remove(audio_path)
-    os.remove(output_path)
     os.remove(looped_video_path)
     os.remove(trimmed_video_path)
     os.remove(concat_list_path)
+    os.remove(output_path)
 
     return jsonify({'video_link': shareable_link}), 200
