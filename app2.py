@@ -32,34 +32,56 @@ if not os.path.exists(TEMP_DIR):
 
 def download_file(url, dest_path):
     session = requests.Session()
+
+    # Handle Google Drive download URLs
     if "drive.google.com" in url:
-        file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url) or re.search(r'id=([a-zA-Z0-9_-]+)', url)
-        if not file_id_match:
-            return False  # Unable to extract file ID
-        file_id = file_id_match.group(1)
-        download_url = f'https://docs.google.com/uc?export=download&id={file_id}'
-        response = session.get(download_url, stream=True)
-        # Handle potential confirmation prompt
-        token = None
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                token = value
-                break
-        if token:
-            params = {'confirm': token}
-            response = session.get(download_url, params=params, stream=True)
+        file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+        if file_id_match:
+            file_id = file_id_match.group(1)
         else:
-            response = session.get(download_url, stream=True)
+            file_id_match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+            if file_id_match:
+                file_id = file_id_match.group(1)
+            else:
+                return False  # Unable to extract file ID
+
+        def get_confirm_token(response):
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    return value
+            return None
+
+        def save_response_content(response, destination):
+            CHUNK_SIZE = 32768
+            with open(destination, "wb") as f:
+                for chunk in response.iter_content(CHUNK_SIZE):
+                    if chunk:
+                        f.write(chunk)
+
+        base_url = "https://docs.google.com/uc?export=download"
+        response = session.get(base_url, params={'id': file_id}, stream=True)
+        token = get_confirm_token(response)
+
+        if token:
+            params = {'id': file_id, 'confirm': token}
+            response = session.get(base_url, params=params, stream=True)
+
+        if response.status_code == 200:
+            save_response_content(response, dest_path)
+            return True
+        else:
+            return False
     else:
         response = session.get(url, stream=True)
-    if response.status_code == 200:
-        with open(dest_path, 'wb') as f:
-            for chunk in response.iter_content(32768):
-                if chunk:
-                    f.write(chunk)
-        return True
-    else:
-        return False
+
+        if response.status_code == 200:
+            with open(dest_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    if chunk:
+                        f.write(chunk)
+            return True
+        else:
+            return False
 
 def upload_to_google_drive(file_path, file_name):
     file_metadata = {
@@ -84,38 +106,38 @@ def upload_to_google_drive(file_path, file_name):
 
 def get_audio_duration(audio_path):
     result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', audio_path],
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
     if result.returncode != 0:
         return None
+    duration_str = result.stdout.decode().strip()
     try:
-        data = json.loads(result.stdout.decode())
-        duration = float(data['format']['duration'])
-        return duration
-    except (KeyError, ValueError, json.JSONDecodeError):
+        return float(duration_str)
+    except ValueError:
         return None
 
 def get_video_duration(video_path):
     result = subprocess.run(
-        ['./ffmpeg/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', video_path],
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
+         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
     if result.returncode != 0:
         return None
+    duration_str = result.stdout.decode().strip()
     try:
-        data = json.loads(result.stdout.decode())
-        duration = float(data['format']['duration'])
-        return duration
-    except (KeyError, ValueError, json.JSONDecodeError):
+        return float(duration_str)
+    except ValueError:
         return None
 
 def process_video_audio(video_url, audio_url):
     # Create secure filenames
-    video_filename = secure_filename(video_url.split('/')[-1]) + '.mp4'
-    audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
+    video_filename = secure_filename(video_url.split('/')[-1] + '.mp4')
+    audio_filename = secure_filename(audio_url.split('/')[-1] + '.mp3')
     video_path = os.path.join(TEMP_DIR, video_filename)
     audio_path = os.path.join(TEMP_DIR, audio_filename)
     output_filename = f"output_{os.getpid()}.mp4"
@@ -138,15 +160,11 @@ def process_video_audio(video_url, audio_url):
     # Calculate loop count
     loop_count = int(audio_duration // video_duration) + 1
 
-    # Loop the video
-    looped_videos = []
-    for _ in range(loop_count):
-        looped_videos.append(f"file '{video_path}'\n")
-
     # Create concat list file
     concat_list_path = os.path.join(TEMP_DIR, f"concat_list_{os.getpid()}.txt")
     with open(concat_list_path, 'w') as f:
-        f.writelines(looped_videos)
+        for _ in range(loop_count):
+            f.write(f"file '{video_path}'\n")
 
     # Concatenate videos
     looped_video_path = os.path.join(TEMP_DIR, f"looped_video_{os.getpid()}.mp4")
