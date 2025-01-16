@@ -145,36 +145,27 @@ def create_video():
             os.remove(image_path)
             return jsonify({"error": "Failed to get audio duration."}), 500
 
-        # FFmpeg command to create video from image and audio without flashing issue
+        # FFmpeg command to create video from image and audio (from the initial working script)
         ffmpeg_command = [
-            "./ffmpeg/ffmpeg",
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            image_path,
-            "-i",
-            audio_path,
-            "-c:v",
-            "libx264",
-            "-tune",
-            "stillimage",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-pix_fmt",
-            "yuv420p",
+            "./ffmpeg/ffmpeg", "-y",
+            "-loop", "1",
+            "-i", image_path,
+            "-i", audio_path,
+            "-c:v", "libx264",
+            "-tune", "stillimage",
+            "-profile:v", "high",
+            "-level", "4.2",
+            "-vf", "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2,format=yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ac", "2",
+            "-ar", "48000",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-r", "30",
+            "-t", str(duration),
             "-shortest",
-            "-movflags",
-            "+faststart",
-            "-vf",
-            "format=yuv420p,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-r",
-            "30",
-            "-t",
-            str(duration),
-            output_path,
+            output_path
         ]
 
         # Run the FFmpeg command
