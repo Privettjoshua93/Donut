@@ -23,29 +23,32 @@ def create_video():
     video_url = data.get('video_url')
     audio_url = data.get('audio_url')
 
-    if not audio_url:
-        return jsonify({'error': 'audio_url is required.'}), 400
-
+    # Error if both image_url and video_url are provided
     if image_url and video_url:
         return jsonify({'error': 'Please provide either image_url or video_url, not both.'}), 400
 
-    if image_url:
+    # Case 1: Only video_url is provided (extract audio)
+    if video_url and not audio_url and not image_url:
+        return extract_audio_from_video(video_url)
+
+    # Case 2: image_url and audio_url are provided (create video from image and audio)
+    if image_url and audio_url and not video_url:
         return process_image_audio(image_url, audio_url)
-    elif video_url:
+
+    # Case 3: video_url and audio_url are provided (combine video and audio)
+    if video_url and audio_url and not image_url:
         return create_video_from_video(video_url, audio_url)
-    else:
+
+    # Error if neither image_url nor video_url are provided
+    if not image_url and not video_url:
         return jsonify({'error': 'Either image_url or video_url must be provided.'}), 400
 
-@app.route('/extract_audio', methods=['POST'])
-def extract_audio():
-    data = request.json
+    # Error if audio_url is missing when required
+    if (image_url or video_url) and not audio_url:
+        return jsonify({'error': 'audio_url is required when providing image_url or video_url for video creation.'}), 400
 
-    video_url = data.get('video_url')
-
-    if not video_url:
-        return jsonify({'error': 'video_url is required.'}), 400
-
-    return extract_audio_from_video(video_url)
+    # General error for any other invalid cases
+    return jsonify({'error': 'Invalid parameters provided.'}), 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
