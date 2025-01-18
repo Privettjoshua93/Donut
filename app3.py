@@ -4,14 +4,16 @@ import os
 import requests
 from werkzeug.utils import secure_filename
 import json
-from urllib.parse import urlparse
+import re
+from urllib.parse import urlparse, parse_qs
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # Get Google Drive Folder ID and Credentials from Environment Variables
+# Use a separate folder ID for audio files
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
+AUDIO_DRIVE_FOLDER_ID = os.environ.get('AUDIO_DRIVE_FOLDER_ID')
 
 # Load credentials
 credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -83,10 +85,10 @@ def download_file(url, dest_path):
     else:
         return False
 
-def upload_to_google_drive(file_path, file_name):
+def upload_audio_to_google_drive(file_path, file_name):
     file_metadata = {
         'name': file_name,
-        'parents': [GOOGLE_DRIVE_FOLDER_ID]
+        'parents': [AUDIO_DRIVE_FOLDER_ID]
     }
     media = MediaFileUpload(file_path, resumable=True)
     # Upload the file
@@ -117,37 +119,34 @@ def extract_audio_from_video(video_url):
     video_basename = os.path.splitext(video_filename)[0]
     video_filename = f"{video_basename}{video_extension}"
 
+    audio_filename = f"{video_basename}.mp3"
+
     video_path = os.path.join(TEMP_DIR, video_filename)
+    audio_path = os.path.join(TEMP_DIR, audio_filename)
 
     # Download video
     if not download_file(video_url, video_path):
         return jsonify({'error': 'Failed to download video.'}), 400
 
-    # Create output audio filename
-    output_audio_filename = f"{video_basename}.mp3"
-    output_audio_path = os.path.join(TEMP_DIR, output_audio_filename)
-
-    # FFmpeg command to extract audio
+    # Extract audio using FFmpeg
     ffmpeg_command = [
         './ffmpeg/ffmpeg', '-y',
         '-i', video_path,
-        '-vn',
-        '-acodec', 'libmp3lame',
-        '-b:a', '192k',
-        output_audio_path
+        '-q:a', '0',
+        '-map', 'a',
+        audio_path
     ]
 
-    # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        return jsonify({'error': 'FFmpeg failed to extract audio.', 'details': error_msg}), 500
+        return jsonify({'error': 'FFmpeg failed to extract audio from video.', 'details': error_msg}), 500
 
     # Upload the audio to Google Drive
-    shareable_link = upload_to_google_drive(output_audio_path, output_audio_filename)
+    shareable_link = upload_audio_to_google_drive(audio_path, audio_filename)
 
     # Clean up files
     os.remove(video_path)
-    os.remove(output_audio_path)
+    os.remove(audio_path)
 
     return jsonify({'audio_link': shareable_link}), 200
