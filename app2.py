@@ -125,9 +125,24 @@ def get_duration(file_path):
         return None
 
 def create_video_from_video(video_url, audio_url):
-    # Create secure filenames
-    video_filename = secure_filename(video_url.split('/')[-1]) + '.mp4'
-    audio_filename = secure_filename(audio_url.split('/')[-1]) + '.mp3'
+    # Extract the original file extension for the video
+    video_filename = os.path.basename(urlparse(video_url).path)
+    video_filename = secure_filename(video_filename)
+    video_extension = os.path.splitext(video_filename)[1]
+    if not video_extension:
+        video_extension = '.mp4'  # Default to .mp4 if no extension
+    video_basename = os.path.splitext(video_filename)[0]
+    video_filename = f"{video_basename}{video_extension}"
+
+    # Do the same for the audio file
+    audio_filename = os.path.basename(urlparse(audio_url).path)
+    audio_filename = secure_filename(audio_filename)
+    audio_extension = os.path.splitext(audio_filename)[1]
+    if not audio_extension:
+        audio_extension = '.mp3'  # Default to .mp3 if no extension
+    audio_basename = os.path.splitext(audio_filename)[0]
+    audio_filename = f"{audio_basename}{audio_extension}"
+
     output_filename = f"output_{os.getpid()}.mp4"
 
     video_path = os.path.join(TEMP_DIR, video_filename)
@@ -155,17 +170,19 @@ def create_video_from_video(video_url, audio_url):
     # Calculate the number of loops needed
     loop_count = int(audio_duration // video_duration) + 1
 
-    # FFmpeg command to process video and audio without trimming, looping video as needed
+    # FFmpeg command to process video and audio
     ffmpeg_command = [
         'ffmpeg', '-y',
         '-stream_loop', str(loop_count - 1),
         '-i', video_path,
         '-i', audio_path,
+        '-map', '0:v:0',  # Use the video stream from the first input
+        '-map', '1:a:0',  # Use the audio stream from the second input
         '-c:v', 'libx264',
-        '-vf', "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2",
         '-c:a', 'aac',
-        '-pix_fmt', 'yuv420p',
         '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-vf', "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2",
         '-shortest',
         output_path
     ]
