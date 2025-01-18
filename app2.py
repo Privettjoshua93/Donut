@@ -111,7 +111,7 @@ def upload_to_google_drive(file_path, file_name):
 def get_duration(file_path):
     """Get the duration of a media file in seconds."""
     result = subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries',
+        ['./ffmpeg/ffprobe', '-v', 'error', '-show_entries',
          'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
@@ -167,31 +167,62 @@ def create_video_from_video(video_url, audio_url):
     if video_duration is None:
         return jsonify({'error': 'Failed to get video duration.'}), 500
 
-    # Calculate the number of loops needed
-    loop_count = int(audio_duration // video_duration) + 1
+    # Extract existing audio from video
+    existing_audio_path = os.path.join(TEMP_DIR, f"existing_audio_{os.getpid()}.aac")
+    ffmpeg_extract_audio_command = [
+        './ffmpeg/ffmpeg', '-y',
+        '-i', video_path,
+        '-vn',
+        '-acodec', 'aac',
+        existing_audio_path
+    ]
 
-    # FFmpeg command to process video and audio
+    result = subprocess.run(ffmpeg_extract_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        error_msg = result.stderr.decode()
+        return jsonify({'error': 'FFmpeg failed to extract audio.', 'details': error_msg}), 500
+
+    # Mix existing audio with new audio
+    mixed_audio_path = os.path.join(TEMP_DIR, f"mixed_audio_{os.getpid()}.aac")
+    ffmpeg_mix_audio_command = [
+        './ffmpeg/ffmpeg', '-y',
+        '-i', existing_audio_path,
+        '-i', audio_path,
+        '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        mixed_audio_path
+    ]
+
+    result = subprocess.run(ffmpeg_mix_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        error_msg = result.stderr.decode()
+        return jsonify({'error': 'FFmpeg failed to mix audio.', 'details': error_msg}), 500
+
+    # Calculate the number of loops needed
+    video_duration = get_duration(video_path)
+    mixed_audio_duration = get_duration(mixed_audio_path)
+
+    loop_count = int(mixed_audio_duration // video_duration) + 1
+
+    # Combine video with mixed audio
     ffmpeg_command = [
-        'ffmpeg', '-y',
+        './ffmpeg/ffmpeg', '-y',
         '-stream_loop', str(loop_count - 1),
         '-i', video_path,
-        '-i', audio_path,
-        '-map', '0:v:0',  # Use the video stream from the first input
-        '-map', '1:a:0',  # Use the audio stream from the second input
+        '-i', mixed_audio_path,
         '-c:v', 'libx264',
         '-c:a', 'aac',
         '-b:a', '192k',
         '-pix_fmt', 'yuv420p',
-        '-vf', "scale='min(1080,iw)':'min(1350,ih)',pad=1080:1350:(1080-iw)/2:(1350-ih)/2",
         '-shortest',
         output_path
     ]
 
-    # Run the FFmpeg command
     result = subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error_msg = result.stderr.decode()
-        return jsonify({'error': 'FFmpeg failed to process video and audio.', 'details': error_msg}), 500
+        return jsonify({'error': 'FFmpeg failed to combine video and audio.', 'details': error_msg}), 500
 
     # Upload the video to Google Drive
     shareable_link = upload_to_google_drive(output_path, 'output.mp4')
@@ -200,5 +231,7 @@ def create_video_from_video(video_url, audio_url):
     os.remove(video_path)
     os.remove(audio_path)
     os.remove(output_path)
+    os.remove(existing_audio_path)
+    os.remove(mixed_audio_path)
 
     return jsonify({'video_link': shareable_link}), 200
