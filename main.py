@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
-from app import create_video_from_image
+import os
+from app import process_image_audio
 from app2 import create_video_from_video
 
 app = Flask(__name__)
@@ -27,7 +28,7 @@ def create_video():
         return jsonify({'error': 'Please provide either image_url or video_url, not both.'}), 400
 
     if image_url:
-        return create_video_from_image(image_url, audio_url)
+        return process_image_audio(image_url, audio_url)
     elif video_url:
         return create_video_from_video(video_url, audio_url)
     else:
