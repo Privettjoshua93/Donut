@@ -1,0 +1,3 @@
+Issue: app3 cuts the video short once the audio ends.
+
+Fix: make it the same as app2 where it loops.
